@@ -1,14 +1,3 @@
-import os
-import sys
-
-# Auto-instalador do openpyxl se ele sumir do ambiente do Streamlit
-try:
-    import openpyxl
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
-    import openpyxl
-
 import pandas as pd
 import streamlit as st
 from datetime import datetime, timedelta
@@ -16,7 +5,6 @@ from datetime import datetime, timedelta
 # 1. CONFIGURAÇÃO DA PÁGINA
 st.set_page_config(page_title="Validador de Insumos - Pesagem", page_icon="⚖️", layout="centered")
 
-# Estilização visual para os alertas da produção
 st.markdown("""
     <style>
     .alerta-critico {
@@ -41,32 +29,46 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("⚖️ Controle de Validades - Setor de Pesagem")
-st.write("Insira os códigos dos materiais da OP (separados por vírgula) para checar lotes críticos de 3 meses.")
+st.write("Carregue a planilha do SAP e insira os códigos das matérias-primas para checar lotes críticos de 6 meses (180 dias).")
 
-# 2. CARREGAMENTO DA BASE DO SAP (LX02)
-@st.cache_data
-def carregar_sap():
-    pasta_atual = os.path.dirname(os.path.abspath(__file__))
-    caminho_excel = os.path.join(pasta_atual, "lx02_export.xlsx")
+# 2. ÁREA DE IMPORTAÇÃO DA BASE DE DADOS (DINÂMICA)
+st.subheader("📊 1. Carregar Base de Dados do SAP")
+arquivo_carregado = st.file_uploader(
+    "Arraste ou selecione o arquivo Excel exportado do SAP (.xlsx):", 
+    type=["xlsx"]
+)
+
+def processar_sap(arquivo):
+    # Lê o arquivo tratando a coluna Material como texto
+    df = pd.read_excel(arquivo, dtype={'Material': str}, engine='openpyxl')
     
-    # Lê forçando os códigos a virem como texto
-    df = pd.read_excel(caminho_excel, dtype={'Codigo_Pr': str})
+    # Limpa espaços em branco dos nomes das colunas
+    df.columns = [str(c).strip() for c in df.columns]
     
-    # Limpa linhas vazias na data e converte o formato de pontos do SAP
-    df = df.dropna(subset=['Data_Validade'])
-    df['Data_Validade'] = pd.to_datetime(df['Data_Validade'], format='%d.%m.%Y', errors='coerce')
-    df = df.dropna(subset=['Data_Validade'])
+    # Validação das colunas obrigatórias
+    colunas_obrigatorias = ['Material', 'Texto breve material', 'Lote', 'Validade', 'Tipo de material']
+    for col in colunas_obrigatorias:
+        if col not in df.columns:
+            df[col] = "N/A" if col != 'Validade' else pd.NaT
+            
+    # FILTRO: Mantém estritamente o tipo 'ROH' (Matéria-Prima)
+    df['Tipo de material'] = df['Tipo de material'].astype(str).str.strip().str.upper()
+    df = df[df['Tipo de material'] == 'ROH']
+            
+    # CORREÇÃO DA DATA: Força o Pandas a entender que o DIA vem primeiro (formato BR)
+    df['Validade'] = pd.to_datetime(df['Validade'], dayfirst=True, errors='coerce')
+    df = df.dropna(subset=['Validade'])
     
-    # Define limite de 90 dias (3 meses a partir de hoje)
+    # MODIFICAÇÃO: Altera a linha de corte para 180 dias (6 meses)
     limite_data = datetime.now() + timedelta(days=180)
-    criticos = df[df['Data_Validade'] <= limite_data]
+    criticos = df[df['Validade'] <= limite_data]
     
     resultado = {}
     for _, linha in criticos.iterrows():
-        cod = str(linha['Codigo_Pr']).strip()
-        nome = str(linha['Texto_bre']).strip() if 'Texto_bre' in df.columns else "Não Informado"
-        lote = str(linha['Lote']).strip() if 'Lote' in df.columns else "N/A"
-        validade_str = linha['Data_Validade'].strftime('%d/%m/%Y')
+        cod = str(linha['Material']).strip()
+        nome = str(linha['Texto breve material']).strip()
+        lote = str(linha['Lote']).strip()
+        validade_str = linha['Validade'].strftime('%d/%m/%Y')
         
         if cod not in resultado:
             resultado[cod] = []
@@ -74,68 +76,67 @@ def carregar_sap():
         
     return resultado, criticos
 
-try:
-    mapa_critico, df_criticos_puro = carregar_sap()
-    st.sidebar.success("📊 Base SAP LX02 carregada!")
-    
-    # EXIBIR PAINEL DE LOTES CRÍTICOS NA BARRA LATERAL
-    st.sidebar.markdown("### 🚨 Lotes Críticos no Estoque")
-    if not df_criticos_puro.empty:
-        # Formata o visual da tabela na lateral para o operador consultar de relance
-        for _, reg in df_criticos_puro.iterrows():
-            validade_formatada = reg['Data_Validade'].strftime('%d/%m/%Y')
-            st.sidebar.markdown(
-                f"**Cód:** {reg['Codigo_Pr']} | **Lote:** {reg['Lote']}\n"
-                f"*{reg['Texto_bre']}*\n"
-                f"Vence em: **{validade_formatada}**\n"
-                "---"
-            )
-    else:
-        st.sidebar.info("Nenhum lote crítico encontrado para os próximos 3 meses.")
+# Só libera o resto da tela se o operador tiver carregado um arquivo
+if arquivo_carregado is not None:
+    try:
+        mapa_critico, df_criticos_puro = processar_sap(arquivo_carregado)
+        st.sidebar.success("📊 MPs (ROH) processadas com sucesso!")
         
-except Exception as e:
-    st.error("❌ ERRO ao processar as colunas do Excel.")
-    st.info("Verifique se as colunas estão como: 'Codigo_Pr', 'Texto_bre', 'Lote' and 'Data_Validade'.")
-    st.code(f"Detalhe técnico: {str(e)}")
-    st.stop()
+        # EXIBIR PAINEL DE LOTES CRÍTICOS NA BARRA LATERAL (AGORA PARA 6 MESES)
+        st.sidebar.markdown(f"### 🚨 Lotes Críticos de MP ({len(df_criticos_puro)})")
+        if not df_criticos_puro.empty:
+            # Ordena do mais próximo do vencimento para o mais distante
+            df_criticos_puro = df_criticos_puro.sort_values(by='Validade')
+            for _, reg in df_criticos_puro.iterrows():
+                validade_formatada = reg['Validade'].strftime('%d/%m/%Y')
+                st.sidebar.markdown(
+                    f"**Cód:** {reg['Material']} | **Lote:** {reg['Lote']}\n"
+                    f"*{reg['Texto breve material']}*\n"
+                    f"Vence em: **{validade_formatada}**\n"
+                    "---"
+                )
+        else:
+            st.sidebar.info("Nenhuma matéria-prima crítica para os próximos 6 meses.")
+            
+        # 3. CAMPO DE ENTRADA DO OPERADOR
+        st.subheader("🔍 2. Consulta de Insumos da OP")
+        entrada_usuario = st.text_area(
+            "Digite ou cole os códigos das matérias-primas (separe por vírgula):",
+            placeholder="Exemplo: 100001, 100002"
+        )
 
-# 3. CAMPO DE ENTRADA DO OPERADOR
-st.subheader("Consulta de Insumos da OP")
-entrada_usuario = st.text_area(
-    "Digite ou cole os códigos dos materiais (separe por vírgula):",
-    placeholder="Exemplo: 100001, 100002"
-)
-
-if st.button("🔍 Verificar Validades", use_container_width=True):
-    if entrada_usuario:
-        codigos_verificar = [c.strip() for c in entrada_usuario.split(",") if c.strip()]
-        
-        st.write("### Resultado da Análise da OP:")
-        
-        algum_critico_encontrado = False
-        
-        for codigo in codigos_verificar:
-            # SÓ MOSTRA SE ESTIVER CRÍTICO
-            if codigo in mapa_critico:
-                algum_critico_encontrado = True
-                for info_lote in mapa_critico[codigo]:
-                    st.markdown(f"""
-                        <div class="alerta-critico">
-                            ⚠️ <b>PRODUTO CRÍTICO DETECTADO!</b><br>
-                            <b>Nome:</b> {info_lote['nome']}<br>
-                            <b>Código:</b> {codigo}<br>
-                            <b>Lote:</b> {info_lote['lote']}<br>
-                            <b>Data de Vencimento:</b> {info_lote['validade']}
+        if st.button("Verificar Validades", use_container_width=True):
+            if entrada_usuario:
+                codigos_verificar = [c.strip() for c in entrada_usuario.split(",") if c.strip()]
+                
+                st.write("### Resultado da Análise da OP:")
+                algum_critico_encontrado = False
+                
+                for codigo in codigos_verificar:
+                    if codigo in mapa_critico:
+                        algum_critico_encontrado = True
+                        for info_lote in mapa_critico[codigo]:
+                            st.markdown(f"""
+                                <div class="alerta-critico">
+                                    ⚠️ <b>MATÉRIA-PRIMA CRÍTICA!</b><br>
+                                    <b>Nome:</b> {info_lote['nome']}<br>
+                                    <b>Código:</b> {codigo}<br>
+                                    <b>Lote:</b> {info_lote['lote']}<br>
+                                    <b>Data de Vencimento:</b> {info_lote['validade']}
+                                </div>
+                            """, unsafe_allow_html=True)
+                
+                if not algum_critico_encontrado:
+                    st.markdown("""
+                        <div class="sucesso-liberado">
+                            ✅ <b>OP LIBERADA:</b> Nenhuma das matérias-primas inseridas possui lotes críticos.
                         </div>
                     """, unsafe_allow_html=True)
-        
-        # Se nenhum dos códigos digitados tinha lote crítico, solta a mensagem verde tranquila
-        if not algum_critico_encontrado:
-            st.markdown("""
-                <div class="sucesso-liberado">
-                    ✅ <b>OP LIBERADA:</b> Nenhum dos materiais inseridos possui lotes críticos próximos ao vencimento.
-                </div>
-            """, unsafe_allow_html=True)
-            
-    else:
-        st.warning("Por favor, insira pelo menos um código de material para verificar.")
+            else:
+                st.warning("Por favor, insira pelo menos um código de material para verificar.")
+
+    except Exception as e:
+        st.error("❌ Erro ao ler a estrutura desse arquivo Excel.")
+        st.code(f"Detalhe técnico: {str(e)}")
+else:
+    st.info("💡 Por favor, carregue o arquivo Excel exportado do SAP para ativar o validador.")
