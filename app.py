@@ -69,28 +69,30 @@ def processar_sap_alta_performance(arquivo):
         st.error(f"❌ Layout incompatível detectado na linha {linha_titulos + 1}.")
         st.stop()
 
-    # Limpeza básica de nulos
+    # Limpeza básica de nulos e espaços
     df = df.dropna(subset=[c_cod, c_val, c_lot, c_nom])
     df[c_cod] = df[c_cod].str.strip()
     df[c_lot] = df[c_lot].str.strip()
     df[c_nom] = df[c_nom].str.strip()
     df['cod_limpo'] = df[c_cod].str.lstrip('0')
     
-    # ------------------ RECONHECIMENTO EXCLUSIVO DE LOTES MP ------------------
-    # Mantém estritamente as linhas onde a coluna Lote começa com a sigla "MP"
+    # 1. FILTRAGEM EXCLUSIVA: Mantém estritamente lotes que começam com "MP"
     df = df[df[c_lot].str.upper().str.startswith('MP', na=False)]
-    # --------------------------------------------------------------------------
     
-    # Conversão vetorizada de data
+    # 2. CONVERSÃO VETORIZADA DE DATA
     df[c_val] = df[c_val].str.split().str[0]
     df['Data_Processada'] = pd.to_datetime(df[c_val], dayfirst=True, errors='coerce')
     df = df.dropna(subset=['Data_Processada'])
     
-    # Filtro temporal: De ontem até 180 dias para a frente
+    # 3. FILTRO TEMPORAL: De ontem até 180 dias para a frente
     data_inicio = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
     limite_data = data_inicio + timedelta(days=181)
+    df_tempo = df[(df['Data_Processada'] >= data_inicio) & (df['Data_Processada'] <= limite_data)].copy()
     
-    criticos = df[(df['Data_Processada'] >= data_inicio) & (df['Data_Processada'] <= limite_data)].copy()
+    # ------------------ REMOÇÃO ABSOLUTA DE DUPLICADOS (WM PALETES) ------------------
+    # Agrupa removendo duplicidades de posições de estoque (mesmo material/lote vira uma linha só)
+    criticos = df_tempo.drop_duplicates(subset=[c_cod, c_lot, 'Data_Processada'])
+    # ---------------------------------------------------------------------------------
     
     resultado = {}
     for _, linha in criticos.iterrows():
@@ -115,7 +117,7 @@ if arquivo_carregado is not None:
         mapa_critico, df_criticos_puro, c_cod, c_nom, c_lot, c_val = processar_sap_alta_performance(arquivo_carregado)
         st.sidebar.success("⚡ Processamento concluído!")
         
-        # BARRA LATERAL COM OS LOTES CRÍTICOS FUTUROS
+        # BARRA LATERAL COM OS LOTES CRÍTICOS UNIFICADOS
         st.sidebar.markdown(f"### 🚨 Lotes MP a Vencer ({len(df_criticos_puro)})")
         if not df_criticos_puro.empty:
             df_ordenado_lateral = df_criticos_puro.sort_values(by=c_val)
@@ -138,7 +140,7 @@ if arquivo_carregado is not None:
             st.subheader("Consulta de Insumos da Ordem de Processo")
             entrada_usuario = st.text_area(
                 "Digite ou cole os códigos das matérias-primas da OP (separe por vírgula):",
-                placeholder="Exemplo: 102108, 100271"
+                placeholder="Exemplo: 100389, 102108"
             )
 
             if st.button("Verificar Validades", use_container_width=True):
@@ -189,8 +191,8 @@ if arquivo_carregado is not None:
                 st.markdown(f"""
                     <div class="card-metrica">
                         🎯 <b>POTENCIAL DE EVITABILIDADE DE PERDAS (FUTURAS):</b><br>
-                        Identificados <b>{len(df_criticos_puro)} lotes críticos ativos</b> com nomenclatura estrita de Matéria-Prima (Prefixos 'MP').<br>
-                        <i>O controle de insumos e o descarte analítico foram purificados do modelo gráfico.</i>
+                        Identificados <b>{len(df_criticos_puro)} lotes de MP únicos</b> com vencimento crítico mapeado para os próximos 6 meses.<br>
+                        <i>Otimização: Linhas duplicadas por posições físicas de palete no estoque WM foram unificadas.</i>
                     </div>
                 """, unsafe_allow_html=True)
                 
