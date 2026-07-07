@@ -2,8 +2,8 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime, timedelta
 
-# 1. CONFIGURAÇÃO DA PÁGINA
-st.set_page_config(page_title="Validador de Insumos - Pesagem", page_icon="⚖️", layout="centered")
+# 1. CONFIGURAÇÃO DA PÁGINA (STREAMLIT)
+st.set_page_config(page_title="Validador Ultra Rápido - Pesagem", page_icon="⚖️", layout="centered")
 
 st.markdown("""
     <style>
@@ -28,8 +28,8 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("⚖️ Controle de Validades - Setor de Pesagem")
-st.write("Carregue a planilha do SAP e insira os códigos das matérias-primas para validação (6 meses).")
+st.title("⚖️ Controle de Validades Flash - Setor de Pesagem")
+st.write("Processamento de alta performance para liberação diária de OPs.")
 
 # 2. ÁREA DE IMPORTAÇÃO
 st.subheader("📊 1. Carregar Base de Dados do SAP")
@@ -38,73 +38,68 @@ arquivo_carregado = st.file_uploader(
     type=["xlsx"]
 )
 
-def processar_sap_bruto(arquivo):
-    # Carrega o arquivo sem cabeçalho para mapear manualmente as linhas
-    df_raw = pd.read_excel(arquivo, header=None, dtype=str, engine='openpyxl')
+@st.cache_data(ttl=3600)  # Otimização Streamlit: Mantém em memória se o mesmo arquivo for usado na mesma sessão
+def processar_sap_alta_performance(arquivo):
+    # 1. Carga única e rápida: lê as primeiras 25 linhas apenas para achar o cabeçalho
+    df_header_check = pd.read_excel(arquivo, nrows=25, header=None, engine='openpyxl')
     
-    linha_titulos = None
-    for idx, row in df_raw.iterrows():
+    linha_titulos = 8  # Fallback padrão (linha 9 do Excel)
+    for idx, row in df_header_check.iterrows():
         valores = [str(v).strip().upper() for v in row.values if pd.notna(v)]
         if 'MATERIAL' in valores:
             linha_titulos = idx
             break
             
-    if linha_titulos is None:
-        st.error("❌ Não foi possível encontrar a coluna 'Material' nas primeiras linhas do arquivo.")
-        st.stop()
-        
-    # Reconstrói o DataFrame usando a linha correta como cabeçalho
-    df_dados = df_raw.iloc[linha_titulos+1:].copy()
-    df_dados.columns = [str(c).strip() for c in df_raw.iloc[linha_titulos].values]
+    # 2. Carrega a planilha real pulando o topo de forma ultra rápida
+    arquivo.seek(0)
+    df = pd.read_excel(arquivo, skiprows=linha_titulos, dtype=str, engine='openpyxl')
+    
+    # Remove espaços vazios dos nomes das colunas de forma vetorizada
+    df.columns = df.columns.str.strip()
     
     c_cod = 'Material'
     c_nom = 'Texto breve material'
     c_lot = 'Lote'
     c_val = 'Data venc.'
     
-    # Remove linhas onde as colunas essenciais estão nulas
-    df_dados = df_dados.dropna(subset=[c_cod, c_val])
-    
-    # Padroniza textos, códigos e lotes
-    df_dados[c_cod] = df_dados[c_cod].astype(str).str.strip()
-    df_dados[c_nom] = df_dados[c_nom].astype(str).str.strip()
-    df_dados[c_lot] = df_dados[c_lot].astype(str).str.strip()
-    
-    # MELHORIA CRUCIAL: Drop de Materiais de Embalagem com base na coluna LOTE
-    # Remove qualquer linha onde o Lote comece com "ME" (ignora maiúsculas/minúsculas)
-    df_dados = df_dados[~df_dados[c_lot].str.upper().str.startswith('ME', na=False)]
-    
-    # Cria a coluna de código limpo (sem zeros à esquerda) para a busca flexível
-    df_dados['cod_limpo'] = df_dados[c_cod].str.lstrip('0')
-    
-    # Conversão robusta de datas
-    datas_convertidas = []
-    for val in df_dados[c_val]:
-        val_str = str(val).strip().split()[0]
-        try:
-            dt = pd.to_datetime(val_str, dayfirst=True, errors='coerce')
-        except:
-            dt = pd.NaT
-        datas_convertidas.append(dt)
+    # Validação expressa de colunas estruturais
+    if c_cod not in df.columns or c_val not in df.columns:
+        st.error(f"❌ Layout incompatível detectado na linha {linha_titulos + 1}.")
+        st.stop()
         
-    df_dados['Data_Processada'] = datas_convertidas
-    df_dados = df_dados.dropna(subset=['Data_Processada'])
+    # 3. Limpeza Expressa de Nulos e Espaços
+    df = df.dropna(subset=[c_cod, c_val, c_lot])
+    df[c_cod] = df[c_cod].str.strip()
+    df[c_lot] = df[c_lot].str.strip()
     
-    # Define a janela de corte de 6 meses (180 dias)
+    # 4. FILTRAGEM VETORIZADA: Drop rápido de lotes que começam com 'ME' (Materiais de Embalagem)
+    # O operador ~ inverte a máscara booleana feita diretamente em C
+    df = df[~df[c_lot].str.upper().str.startswith('ME', na=False)]
+    
+    # Cria os códigos limpos de forma vetorizada (muito mais rápido que loops)
+    df['cod_limpo'] = df[c_cod].str.lstrip('0')
+    
+    # 5. CONVERSÃO VETORIZADA DE DATA: Remove resíduos de hora e converte o bloco inteiro de uma vez
+    df[c_val] = df[c_val].str.split().str[0]
+    df['Data_Processada'] = pd.to_datetime(df[c_val], dayfirst=True, errors='coerce')
+    df = df.dropna(subset=['Data_Processada'])
+    
+    # Janela de corte estipulada para 180 dias
     limite_data = datetime.now() + timedelta(days=180)
-    criticos = df_dados[df_dados['Data_Processada'] <= limite_data]
+    criticos = df[df['Data_Processada'] <= limite_data]
     
+    # 6. Mapeamento indexado em dicionário para busca instantânea O(1)
     resultado = {}
     for _, linha in criticos.iterrows():
-        cod_orig = str(linha[c_cod]).strip()
-        cod_limp = str(linha['cod_limpo']).strip()
+        cod_orig = linha[c_cod]
+        cod_limp = linha['cod_limpo']
         nome = str(linha[c_nom]).strip()
-        lote = str(linha[c_lot]).strip()
+        lote = linha[c_lot]
         validade_str = linha['Data_Processada'].strftime('%d/%m/%Y')
         
         dados_lote = {"nome": nome, "lote": lote, "validade": validade_str}
         
-        # Registra o lote crítico nas duas opções de busca (com e sem zero à esquerda)
+        # Aloca memória indexada para os formatos com e sem zero
         if cod_orig not in resultado: resultado[cod_orig] = []
         resultado[cod_orig].append(dados_lote)
         
@@ -115,10 +110,11 @@ def processar_sap_bruto(arquivo):
 
 if arquivo_carregado is not None:
     try:
-        mapa_critico, df_criticos_puro, c_cod, c_nom, c_lot, c_val = processar_sap_bruto(arquivo_carregado)
-        st.sidebar.success("📊 Planilha processada!")
+        # Executa o processamento otimizado
+        mapa_critico, df_criticos_puro, c_cod, c_nom, c_lot, c_val = processar_sap_alta_performance(arquivo_carregado)
+        st.sidebar.success("⚡ Processamento concluído em milissegundos!")
         
-        # EXIBIR PAINEL DE LOTES CRÍTICOS NA BARRA LATERAL (APENAS MPs)
+        # PAINEL LATERAL DE MATÉRIAS-PRIMAS CRÍTICAS
         st.sidebar.markdown(f"### 🚨 Lotes Críticos de MP ({len(df_criticos_puro)})")
         if not df_criticos_puro.empty:
             df_criticos_puro = df_criticos_puro.sort_values(by=c_val)
@@ -131,7 +127,7 @@ if arquivo_carregado is not None:
                     "---"
                 )
         else:
-            st.sidebar.info("Nenhuma matéria-prima crítica encontrada para os próximos 6 meses.")
+            st.sidebar.info("Nenhuma MP crítica para os próximos 6 meses.")
             
         # 3. CAMPO DE ENTRADA DO OPERADOR
         st.subheader("🔍 2. Consulta de Insumos da OP")
@@ -142,20 +138,18 @@ if arquivo_carregado is not None:
 
         if st.button("Verificar Validades", use_container_width=True):
             if entrada_usuario:
+                # Separação e limpeza instantânea de strings
                 codigos_verificar = [c.strip() for c in entrada_usuario.split(",") if c.strip()]
-                
-                # Monta uma lista limpa retirando os zeros à esquerda para cruzar os dados
                 codigos_verificar_limpos = [c.lstrip('0') for c in codigos_verificar]
                 todos_codigos_busca = list(set(codigos_verificar + codigos_verificar_limpos))
                 
                 st.write("### Resultado da Análise da OP:")
                 algum_critico_encontrado = False
-                codigos_exibidos = set() # Evita duplicar o alerta caso o código bata duas vezes
+                codigos_exibidos = set()
                 
                 for codigo in todos_codigos_busca:
                     if codigo in mapa_critico:
                         for info_lote in mapa_critico[codigo]:
-                            # Identificador único do alerta para não repetir
                             chave_alerta = f"{codigo}_{info_lote['lote']}"
                             if chave_alerta not in codigos_exibidos:
                                 algum_critico_encontrado = True
@@ -180,7 +174,7 @@ if arquivo_carregado is not None:
                 st.warning("Por favor, insira pelo menos um código de material para verificar.")
 
     except Exception as e:
-        st.error("❌ Erro ao processar o arquivo Excel.")
+        st.error("❌ Erro no processamento de alta performance.")
         st.code(f"Detalhe técnico: {str(e)}")
 else:
-    st.info("💡 Por favor, carregue o arquivo Excel exportado do SAP para ativar o validador.")
+    st.info("💡 Carregue a planilha para ativar o validador rápido.")
