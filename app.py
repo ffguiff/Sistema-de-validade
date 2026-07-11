@@ -1,10 +1,12 @@
+import os
 import pandas as pd
 import streamlit as st
 from datetime import datetime, timedelta
 
-# 1. CONFIGURAÇÃO DA PÁGINA (STREAMLIT)
+# Configurações globais da interface do Streamlit
 st.set_page_config(page_title="Validador & Dashboard - Pesagem", page_icon="⚖️", layout="centered")
 
+# Injeção de CSS personalizado para estilização profissional dos alertas e cartões
 st.markdown("""
     <style>
     .alerta-critico {
@@ -38,16 +40,34 @@ st.markdown("""
 st.title("⚖️ Controle de Validades & Dashboard Gerencial")
 st.write("Sistema de alta performance focado estritamente no escoamento de Matérias-Primas (MP).")
 
-# 2. ÁREA DE IMPORTAÇÃO
+PASTA_DATA = "data"
+CAMINHO_LOCAL = os.path.join(PASTA_DATA, "sap_atual.xlsx")
+
+# Cria a pasta de dados local se não existir no servidor para a persistência
+if not os.path.exists(PASTA_DATA):
+    os.makedirs(PASTA_DATA)
+
 st.subheader("📊 1. Carregar Base de Dados do SAP")
 arquivo_carregado = st.file_uploader(
     "Arraste ou selecione o arquivo Excel exportado do SAP (.xlsx):", 
     type=["xlsx"]
 )
 
+planilha_para_processar = None
+
+# Lógica inteligente para blindar o sistema contra re-uploads constantes (Timeouts)
+if arquivo_carregado is not None:
+    with open(CAMINHO_LOCAL, "wb") as f:
+        f.write(arquivo_carregado.getbuffer())
+    planilha_para_processar = CAMINHO_LOCAL
+    st.success("💾 Nova base de dados carregada e salva com sucesso no servidor!")
+elif os.path.exists(CAMINHO_LOCAL):
+    planilha_para_processar = CAMINHO_LOCAL
+    st.info("⚡ Utilizando a última base de dados salva no servidor (Auto-recuperação ativa).")
+
 @st.cache_data(ttl=3600)
-def processar_sap_alta_performance(arquivo):
-    df_header_check = pd.read_excel(arquivo, nrows=25, header=None, engine='openpyxl')
+def processar_sap_alta_performance(caminho_arquivo):
+    df_header_check = pd.read_excel(caminho_arquivo, nrows=25, header=None, engine='openpyxl')
     
     linha_titulos = 8
     for idx, row in df_header_check.iterrows():
@@ -56,8 +76,7 @@ def processar_sap_alta_performance(arquivo):
             linha_titulos = idx
             break
             
-    arquivo.seek(0)
-    df = pd.read_excel(arquivo, skiprows=linha_titulos, dtype=str, engine='openpyxl')
+    df = pd.read_excel(caminho_arquivo, skiprows=linha_titulos, dtype=str, engine='openpyxl')
     df.columns = df.columns.str.strip()
     
     c_cod = 'Material'
@@ -66,33 +85,30 @@ def processar_sap_alta_performance(arquivo):
     c_val = 'Data venc.'
     
     if c_cod not in df.columns or c_val not in df.columns:
-        st.error(f"❌ Layout incompatível detectado na linha {linha_titulos + 1}.")
+        st.error(f"❌ Layout incompatível detectado.")
         st.stop()
 
-    # Limpeza básica de nulos e espaços
     df = df.dropna(subset=[c_cod, c_val, c_lot, c_nom])
     df[c_cod] = df[c_cod].str.strip()
     df[c_lot] = df[c_lot].str.strip()
     df[c_nom] = df[c_nom].str.strip()
     df['cod_limpo'] = df[c_cod].str.lstrip('0')
     
-    # 1. FILTRAGEM EXCLUSIVA: Mantém estritamente lotes que começam com "MP"
+    # Filtro rígido e inclusivo para manter unicamente lotes que começam com 'MP'
     df = df[df[c_lot].str.upper().str.startswith('MP', na=False)]
     
-    # 2. CONVERSÃO VETORIZADA DE DATA
+    # Conversão vetorizada das datas para evitar lentidões
     df[c_val] = df[c_val].str.split().str[0]
     df['Data_Processada'] = pd.to_datetime(df[c_val], dayfirst=True, errors='coerce')
     df = df.dropna(subset=['Data_Processada'])
     
-    # 3. FILTRO TEMPORAL: De ontem até 180 dias para a frente
+    # Filtro temporal: De ontem até 180 dias futuros
     data_inicio = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
     limite_data = data_inicio + timedelta(days=181)
     df_tempo = df[(df['Data_Processada'] >= data_inicio) & (df['Data_Processada'] <= limite_data)].copy()
     
-    # ------------------ REMOÇÃO ABSOLUTA DE DUPLICADOS (WM PALETES) ------------------
-    # Agrupa removendo duplicidades de posições de estoque (mesmo material/lote vira uma linha só)
+    # Eliminação rigorosa de duplicidades decorrentes de múltiplas posições físicas de estoque (WM)
     criticos = df_tempo.drop_duplicates(subset=[c_cod, c_lot, 'Data_Processada'])
-    # ---------------------------------------------------------------------------------
     
     resultado = {}
     for _, linha in criticos.iterrows():
@@ -104,20 +120,21 @@ def processar_sap_alta_performance(arquivo):
         
         dados_lote = {"nome": nome, "lote": lote, "validade": validade_str}
         
-        if cod_orig not in resultado: resultado[cod_orig] = []
+        if cod_orig not in resultado: 
+            resultado[cod_orig] = []
         resultado[cod_orig].append(dados_lote)
         
-        if cod_limp not in resultado: resultado[cod_limp] = []
+        if cod_limp not in resultado: 
+            resultado[cod_limp] = []
         resultado[cod_limp].append(dados_lote)
         
     return resultado, criticos, c_cod, c_nom, c_lot, 'Data_Processada'
 
-if arquivo_carregado is not None:
+if planilha_para_processar is not None:
     try:
-        mapa_critico, df_criticos_puro, c_cod, c_nom, c_lot, c_val = processar_sap_alta_performance(arquivo_carregado)
+        mapa_critico, df_criticos_puro, c_cod, c_nom, c_lot, c_val = processar_sap_alta_performance(planilha_para_processar)
         st.sidebar.success("⚡ Processamento concluído!")
         
-        # BARRA LATERAL COM OS LOTES CRÍTICOS UNIFICADOS
         st.sidebar.markdown(f"### 🚨 Lotes MP a Vencer ({len(df_criticos_puro)})")
         if not df_criticos_puro.empty:
             df_ordenado_lateral = df_criticos_puro.sort_values(by=c_val)
@@ -132,10 +149,8 @@ if arquivo_carregado is not None:
         else:
             st.sidebar.info("Nenhum lote de MP crítica para os próximos 6 meses.")
             
-        # DIVISÃO EM ABAS
         aba_consulta, aba_dashboard = st.tabs(["🔍 Consulta de OPs", "📊 Dashboard de Perdas & Projeções"])
         
-        # --- ABA 1: CONSULTA DIÁRIA ---
         with aba_consulta:
             st.subheader("Consulta de Insumos da Ordem de Processo")
             entrada_usuario = st.text_area(
@@ -176,16 +191,16 @@ if arquivo_carregado is not None:
                                 ✅ <b>OP LIBERADA:</b> Nenhuma das matérias-primas inseridas possui lotes críticos no estoque.
                             </div>
                         """, unsafe_allow_html=True)
-                else:
-                    st.warning("Por favor, insira pelo menos um código de material.")
 
-        # --- ABA 2: DASHBOARD GERENCIAL ---
         with aba_dashboard:
             st.subheader("Projeção Preditiva de Escoamento (Próximos 6 Meses)")
             
             if not df_criticos_puro.empty:
+                # Ordena por data real antes de formatar para manter a integridade da série temporal
                 df_criticos_puro = df_criticos_puro.sort_values(by=c_val)
-                df_criticos_puro['Mês Vencimento'] = df_criticos_puro[c_val].dt.strftime('%m/%Y')
+                
+                # Usamos o formato 'YYYY-MM' (Ex: 2026-07) para garantir que a ordenação alfabética do gráfico seja 100% cronológica
+                df_criticos_puro['Mês Vencimento'] = df_criticos_puro[c_val].dt.strftime('%Y-%m')
                 meses_ordenados = df_criticos_puro['Mês Vencimento'].unique()
                 
                 st.markdown(f"""
