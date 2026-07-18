@@ -35,7 +35,7 @@ st.markdown("""
         margin-bottom: 15px;
     }
     </style>
-""", unsafe_allow_html=True)
+""", unsafe_allow_html=True) 
 
 st.title("⚖️ Controle de Validades & Dashboard Gerencial")
 st.write("Sistema de alta performance focado estritamente no escoamento de Matérias-Primas (MP).")
